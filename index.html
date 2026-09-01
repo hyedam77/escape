@@ -225,10 +225,8 @@
   // 시야 배율에 따른 유령의 3단계 상태
   const DETECT_MUL=1.15, DETECT_ADD=30;   // ① 이 안에 들면 추적 (내 시야보다 조금 넓게)
   const ALERT_MUL=1.95;                   // ② 이 안이면 아주 느리게 다가옴
-  const DRIFT_MUL=0.20;                   //    그때의 속도 배율
                                           // ③ 그 밖이면 제자리에 머문다
   const DRAIN_RECOVER=2.6;      // Pulse 후 시야가 돌아오는 데 걸리는 시간(초)
-  const GHOST_IDLE_MUL=0.42;    // 발견 못 했을 때의 배회 속도
   const GHOST_LOSE=2.0;         // 시야 밖으로 나간 뒤 놓치기까지
   const AMBIENT=0.05, FALLOFF_SCALE=1.35;
 
@@ -239,7 +237,6 @@
   const GHOST_CAP_BASE=11, GHOST_CAP_PER_COLOR=2;   // 동시 상한 (11 → 25)
   const ghostCap = () => GHOST_CAP_BASE + cleared*GHOST_CAP_PER_COLOR;
 
-  const SWITCH_MIN=12.0, SWITCH_MAX=17.0;
   const SCREEN_FLASH_DUR=0.85;
 
   // ---- 줌아웃 (v7: 대폭 앞당기고 변화량 확대) ----
@@ -280,6 +277,15 @@
     {name:'보라', c:'#b665ff', rgb:'182,101,255'}
   ];
 
+  // 최고 기록 영구 저장 (배포 환경)
+  const BEST_KEY='escape_best_v1';
+  function loadBest(){
+    try{ const v=localStorage.getItem(BEST_KEY); if(v!==null){ const n=parseFloat(v); if(isFinite(n)&&n>0) best=n; } }catch(e){}
+  }
+  function saveBest(){
+    try{ if(best!==null) localStorage.setItem(BEST_KEY, String(best)); }catch(e){}
+  }
+
   let world={w:0,h:0};
   let player, exits, ghosts, elapsed, nextSpawnAt, best=null;
   let state='idle', stateT=0;
@@ -288,12 +294,11 @@
   let energy=0, camScale=1, pulses=[];
   let tapStartT=0, tapStartX=0, tapStartY=0, tapMoved=0, lastTapT=-1e9, lastTapX=0, lastTapY=0;
   let movePenalty=0, stopBonus=0;
-  let targetIdx=0, nextSwitch=0, totalPoints=0, cleared=0;
+  let targetIdx=0, totalPoints=0, cleared=0;
   let interFromScale=1;
   let recovered=[], slots=[], recoverFx=null, clearOrder=[];
   let pulseDrain=0;
   let bounds={x0:0,y0:0,x1:0,y1:0}, boundsT={x0:0,y0:0,x1:0,y1:0};
-  let pointOrder=[], lastPointX, lastPointY;
   let interApplied=false;
   let vWall=[], hWall=[];
   // ---- STEP5: 흐름 상태 ----
@@ -307,12 +312,13 @@
   }
   setIntroMode(true);
   const GAMEOVER_T=1.5, ENDING_T=8.2;
-  let prevState='playing', goFx=null, endingT=0;
+  let prevState='playing', goFx=null;
   // 상황 기반 안내 — 현상이 먼저 일어나고, 그것을 짧게 설명한다
   const seenTip={};
   let tipTimer=0, movedT=0, stoppedT=0, ghostSeenT=0, bodyEmpty=0, beaconT=0;
   // 첫 위기에서 Pulse를 직접 발견하게 만드는 안내
   let pulsePrompt=0, pulsePromptPh=0, pulseTaught=false;
+  let tutorialRun=false;   // 이번 판에서 Pulse 학습용 에너지를 제공했는가
   const PULSE_TEACH_ENERGY=0.62;   // 첫 위기 때 최소한 쓸 수 있을 만큼은 채워준다
   const TIP_DUR=2.8;
   function tip(key,text){
@@ -326,7 +332,6 @@
     return (m<10?'0':'')+m+':'+(sec<10?'0':'')+sec.toFixed(1);
   };
   // 시야 밖 유령 접근에 대한 아주 약한 신호
-  const DANGER_NEAR=90;      // 이보다 가까우면 신호 최대
   const DANGER_FAR_MUL=2.1;  // 시야의 이 배율 밖은 신호 없음
   const TELL_MAX_A=0.80;     // 기척 신호 밝기 상한
 
@@ -466,14 +471,12 @@
     for(let k=0;k<n;k++)
       exits.push({x:cells[k].x, y:cells[k].y, color:EXIT_COLORS[order[k]], ci:order[k], shard:Math.random()*6.3});
     targetIdx=Math.floor(Math.random()*exits.length);
-    nextSwitch=SWITCH_MIN+Math.random()*(SWITCH_MAX-SWITCH_MIN);
     for(let k=0;k<GHOST_AT_START;k++) spawnGhost(true);
     recovered=EXIT_COLORS.map(()=>false);
     clearOrder=[];
     recoverFx=null;
     buildSlots();
     targetIdx=Math.floor(Math.random()*exits.length);
-    nextSwitch=SWITCH_MIN+Math.random()*(SWITCH_MAX-SWITCH_MIN);
 
     ghosts=[]; elapsed=0; nextSpawnAt=SPAWN_START*0.6;
     movePenalty=0; stopBonus=0; screenFlash=null; fizzles=[];
@@ -666,7 +669,6 @@
       targetIdx=n;
     }
     if(flash) screenFlash={rgb:exits[targetIdx].color.rgb, t:0};
-    nextSwitch=elapsed+SWITCH_MIN+Math.random()*(SWITCH_MAX-SWITCH_MIN);
   }
 
   function visionCeiling(t){
@@ -829,11 +831,11 @@
     resultOverlay.classList.add('hidden');
     pauseOverlay.classList.add('hidden');
     setIntroMode(!introSeen); introSeen=true;
-    state='awaken'; stateT=0; goFx=null; endingT=0;
+    state='awaken'; stateT=0; goFx=null;
     hud.classList.remove('visible');
     pauseBtn.classList.remove('on'); muteBtn.classList.remove('on');
     tipTimer=0; movedT=0; stoppedT=0; ghostSeenT=0; bodyEmpty=0; beaconT=0;
-    pulsePrompt=0; pulsePromptPh=0;
+    pulsePrompt=0; pulsePromptPh=0; tutorialRun=false;
     hideTip();
   }
   function hideTip(){ tipEl.classList.remove('on'); }
@@ -875,7 +877,8 @@
   function showResult(won){
     state='result'; stateT=0;
     const t=elapsed;
-    if(won && (best===null||t<best)) best=t;
+    // 학습용 에너지를 받은 판은 기록 경쟁에서 제외한다
+    if(won && !tutorialRun && (best===null||t<best)){ best=t; saveBest(); }
     resultLabel.textContent = won?'CLEAR':'GAME OVER';
     resultLabel.className='resultLabel '+(won?'success':'fail');
     resTime.textContent=fmtTime(t);
@@ -907,7 +910,6 @@
       return;
     }
     if(state==='ending'){
-      endingT+=dt;
       // 되돌려준 색만큼 세계가 다시 넓어진다
       const k=Math.min(1, 0.9*dt);
       bounds.x0+=(boundsT.x0-bounds.x0)*k; bounds.y0+=(boundsT.y0-bounds.y0)*k;
@@ -947,7 +949,7 @@
     if(state==='clearing'){
       if(recoverFx) recoverFx.t+=dt;
       if(stateT>=CLEAR_HOLD){
-        recoverFx=null; state='ending'; stateT=0; endingT=0; 
+        recoverFx=null; state='ending'; stateT=0; 
         boundsT=boundsFor(0);          // 세계가 원래 크기로 되돌아간다
       }
       return;
@@ -997,7 +999,7 @@
       else if(!chased) ghostSeenT=0;
       // 유령이 실제로 나를 쫓아 가까이 붙은 첫 순간 → 색과 무관하게 조작을 알려준다
       if(!pulseTaught && chased && near<visionRadius()*1.05){
-        if(energy<PULSE_TEACH_ENERGY) energy=PULSE_TEACH_ENERGY;  // 쓸 수 있게 보장
+        if(energy<PULSE_TEACH_ENERGY){ energy=PULSE_TEACH_ENERGY; tutorialRun=true; }  // 쓸 수 있게 보장
         pulsePrompt=Math.min(1, pulsePrompt+dt*3.2);
         if(!seenTip.pulse){
           seenTip.pulse=true;
@@ -1050,7 +1052,6 @@
     for(const p of pulses) p.t+=dt;
     pulses=pulses.filter(p=>p.t<0.75);
 
-    if(elapsed>=nextSwitch && exits.length>1) pickNewTarget(true);
     if(screenFlash){ screenFlash.t+=dt; if(screenFlash.t>=SCREEN_FLASH_DUR) screenFlash=null; }
     for(const f of fizzles) f.t+=dt;
     fizzles=fizzles.filter(f=>f.t<0.7);
@@ -1987,6 +1988,8 @@
     try{ render(now); }catch(e){ showErr('render: '+e.message); }
     requestAnimationFrame(loop);
   }
+  loadBest();
+  bestVal.textContent = best===null ? '–' : fmtTime(best);
   requestAnimationFrame(loop);
 })();
 </script>
