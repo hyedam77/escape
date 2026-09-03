@@ -197,7 +197,8 @@
     pick(){ tone(660,0.34,'sine',0.26); tone(990,0.30,'sine',0.10,null,0.05); },           // ④ 색 회복
     pulse(p){ tone(220+180*p,0.30,'triangle',0.26,70); noise(0.26,0.12+0.08*p,1500); },    // ④ 빛 사용
     die(){ tone(300,0.85,'sine',0.30,60); noise(0.45,0.18,600); },                          // ④ 잡힘
-    clear(){ tone(523,1.2,'sine',0.20); tone(784,1.2,'sine',0.12,null,0.10); }
+    clear(){ tone(523,1.2,'sine',0.20); tone(784,1.2,'sine',0.12,null,0.10); },
+    denied(){ tone(190,0.16,'sine',0.14,140); }
   };
 
   let DPR=Math.min(window.devicePixelRatio||1,2.5), W=0,H=0;
@@ -319,7 +320,15 @@
   // 첫 위기에서 Pulse를 직접 발견하게 만드는 안내
   let pulsePrompt=0, pulsePromptPh=0, pulseTaught=false;
   let tutorialRun=false;   // 이번 판에서 Pulse 학습용 에너지를 제공했는가
-  const PULSE_TEACH_ENERGY=0.62;   // 첫 위기 때 최소한 쓸 수 있을 만큼은 채워준다
+  // 첫 위기: 아주 짧게 멈추고 조작을 보여준다 (사용하지 않아도 진행된다)
+  const LESSON_FREEZE=1.25;   // 완전 정지 구간
+  const LESSON_HOLD=2.6;      // 정지 해제 후에도 표시가 남는 시간
+  let lessonT=-1;             // -1 = 비활성
+  let fullFx=-1;              // 충전 완료 순간의 짧은 연출 (초)
+  const FULL_FX_T=0.60;
+  let notFullFx=-1;           // 에너지가 부족한 채로 시도했을 때
+  const NOTFULL_FX_T=1.15;
+  const PULSE_TEACH_ENERGY=1.0;    // Pulse는 FULL일 때만 쓸 수 있으므로 가득 채워준다
   const TIP_DUR=2.8;
   function tip(key,text){
     if(seenTip[key]) return;
@@ -696,7 +705,8 @@
                : ZOOM_BASE-(ZOOM_BASE-ZOOM_CALM)*c;
   }
   function firePulse(){
-    if(energy<EN_MIN_USE) return;
+    // Pulse는 에너지가 완전히 찼을 때만 쓸 수 있다
+    if(energy<0.999){ notFullFx=0; SFX.denied(); return; }
     const e=energy;
     // 위력 = 에너지 × 담긴 빛 (빛이 많을수록 강해짐)
     const p=e*(0.55+0.45*lightLevel());
@@ -717,9 +727,9 @@
     pulseDrain = LIGHT_VIS_MAX*lightLevel()*(0.35+0.35*e);
     seenTip.pulse=true;
     if(!pulseTaught){
-      pulseTaught=true; pulsePrompt=0;
-      tipEl.innerHTML='빛을 사용했다<br><span style="font-size:12.5px;color:#a9a6b8">시야가 잠시 좁아진다</span>';
-      tipEl.classList.add('on'); tipTimer=2.6;
+      pulseTaught=true; pulsePrompt=0; lessonT=-1;
+      tipEl.innerHTML='시야가 잠시 좁아진다';
+      tipEl.classList.add('on'); tipTimer=2.2;
     }
   }
 
@@ -835,7 +845,7 @@
     hud.classList.remove('visible');
     pauseBtn.classList.remove('on'); muteBtn.classList.remove('on');
     tipTimer=0; movedT=0; stoppedT=0; ghostSeenT=0; bodyEmpty=0; beaconT=0;
-    pulsePrompt=0; pulsePromptPh=0; tutorialRun=false;
+    pulsePrompt=0; pulsePromptPh=0; tutorialRun=false; lessonT=-1; fullFx=-1; notFullFx=-1;
     hideTip();
   }
   function hideTip(){ tipEl.classList.remove('on'); }
@@ -963,6 +973,14 @@
     }
     if(state!=='playing') return;
 
+    // 첫 위기 레슨의 정지 구간 — 조작은 받되 세계는 멈춘다
+    if(lessonT>=0 && lessonT<LESSON_FREEZE && !pulseTaught){
+      lessonT+=dt; pulsePrompt=Math.min(1, pulsePrompt+dt*4.0);
+      pulsePromptPh+=dt*2.4;
+      if(tipTimer>0){ tipTimer-=dt; if(tipTimer<=0) hideTip(); }
+      return;
+    }
+
     elapsed+=dt;
     timeVal.textContent=elapsed.toFixed(1)+'s';
 
@@ -998,13 +1016,16 @@
       if(cleared>0 && chased){ ghostSeenT+=dt; if(ghostSeenT>0.4) tip('ghost','밝아질수록 유령에게 더 쉽게 발견된다'); }
       else if(!chased) ghostSeenT=0;
       // 유령이 실제로 나를 쫓아 가까이 붙은 첫 순간 → 색과 무관하게 조작을 알려준다
-      if(!pulseTaught && chased && near<visionRadius()*1.05){
-        if(energy<PULSE_TEACH_ENERGY){ energy=PULSE_TEACH_ENERGY; tutorialRun=true; }  // 쓸 수 있게 보장
-        pulsePrompt=Math.min(1, pulsePrompt+dt*3.2);
-        if(!seenTip.pulse){
-          seenTip.pulse=true;
-          tipEl.innerHTML='두 번 탭 &nbsp;→&nbsp; PULSE<br><span style="font-size:12.5px;color:#a9a6b8">빛을 써서 유령을 밀어낸다</span>';
-          tipEl.classList.add('on'); tipTimer=99;      // 실제로 쓸 때까지 남겨둔다
+      if(!pulseTaught && lessonT<0 && chased && near<visionRadius()*1.05){
+        if(energy<PULSE_TEACH_ENERGY){ energy=PULSE_TEACH_ENERGY; tutorialRun=true; fullFx=0; }  // 쓸 수 있게 보장
+        lessonT=0;                                   // 레슨 시작
+        pointerDown=false; moving=false;
+      }
+      if(lessonT>=0 && !pulseTaught){
+        lessonT+=dt;
+        pulsePrompt=Math.min(1, pulsePrompt+dt*4.0);
+        if(lessonT>LESSON_FREEZE+LESSON_HOLD){       // 안 써도 그냥 진행된다
+          lessonT=-1; pulseTaught=true; pulsePrompt=0;
         }
       } else if(!pulseTaught){
         pulsePrompt=Math.max(0, pulsePrompt-dt*2.0);
@@ -1020,7 +1041,9 @@
     }
 
     if(pulseDrain>0) pulseDrain=Math.max(0, pulseDrain - (LIGHT_VIS_MAX/DRAIN_RECOVER)*dt);
-    if(energy>=0.999){ if(!chimeArmed){ chimeArmed=true; SFX.ready(); } } else if(energy<0.6) chimeArmed=false;
+    if(energy>=0.999){ if(!chimeArmed){ chimeArmed=true; SFX.ready(); fullFx=0; } } else if(energy<0.6) chimeArmed=false;
+    if(fullFx>=0){ fullFx+=dt; if(fullFx>FULL_FX_T) fullFx=-1; }
+    if(notFullFx>=0){ notFullFx+=dt; if(notFullFx>NOTFULL_FX_T) notFullFx=-1; }
     stepBounds(dt);
 
     // 시야 밖에서 다가오는 유령의 기척
@@ -1382,13 +1405,6 @@
       c.restore();
     }
 
-    // 빛의 씨앗 — 기척이 가까우면 아주 미세하게 흔들린다
-    let tellMax=0;
-    if(typeof ghosts!=='undefined' && ghosts) for(const g of ghosts) if((g.tell||0)>tellMax) tellMax=g.tell;
-    const flick = 1 - tellMax*0.16*Math.abs(Math.sin(pBreath*3.3));
-    const sg2=c.createRadialGradient(0,4,0,0,4,11*flick);
-    sg2.addColorStop(0,'rgba(255,252,235,'+((0.5+0.4*lv)*flick)+')'); sg2.addColorStop(1,'rgba(255,252,235,0)');
-    c.fillStyle=sg2; c.beginPath(); c.arc(0,4,11*flick,0,Math.PI*2); c.fill();
 
     // 유리 윤곽
     c.strokeStyle='rgba(255,253,246,.85)'; c.lineWidth=2; bBody(c,1); c.stroke();
@@ -1530,35 +1546,103 @@
     }
   }
 
-  // 좌상단 에너지 링 (유일한 HUD 요소)
-  function drawEnergyRing(c,cx,cy){
-    const R=21;
-    const full = energy>=0.999;
-    const breathe = full ? 1+Math.sin(performance.now()/220)*0.035 : 1;
-    c.save();
-    c.translate(cx,cy); c.scale(breathe,breathe);
-    // 미완성 원 (얇은 테두리)
-    c.strokeStyle='rgba(232,236,248,.20)'; c.lineWidth=3;
-    c.beginPath(); c.arc(0,0,R,0,Math.PI*2); c.stroke();
-    // 차오르는 부분
-    if(energy>0.001){
-      c.strokeStyle = full ? 'rgba(255,253,242,.98)' : 'rgba(214,232,255,.85)';
-      c.lineWidth=4;
+  // 캐릭터를 감싸는 에너지 링 — 평상시엔 조용하고, 가득 차는 '순간'에만 크게 반응한다
+  function drawEnergyRing(c, x, y, z){
+    const e=energy;
+    const R=(PLAYER_R+12)*z;
+    c.save(); c.translate(x,y);
+
+    if(e>0.005){
+      const shake = notFullFx>=0 ? Math.sin(notFullFx*44)*(1-notFullFx/NOTFULL_FX_T)*2.4*z : 0;
+      c.save(); c.translate(shake,0);
+      c.strokeStyle='rgba(226,234,250,.12)';
+      c.lineWidth=2.0*z;
+      c.beginPath(); c.arc(0,0,R,0,Math.PI*2); c.stroke();
       c.lineCap='round';
-      c.beginPath(); c.arc(0,0,R,-Math.PI/2, -Math.PI/2+Math.PI*2*energy); c.stroke();
+      c.strokeStyle='rgba(226,240,255,'+(0.35+0.45*e)+')';
+      c.lineWidth=2.6*z;
+      c.beginPath(); c.arc(0,0,R,-Math.PI/2,-Math.PI/2+Math.PI*2*e); c.stroke();
+      c.lineCap='butt';
+      c.restore();
+    }
+
+    // ── 가득 찬 순간: 짧고 강한 한 번의 광파 ──
+    if(fullFx>=0){
+      const k=Math.min(1,fullFx/FULL_FX_T);
+      const out=1-Math.pow(1-k,2.4);          // 빠르게 퍼지고 끝에서 감속
+      // ① 순간적인 밝기 상승 (초반에만)
+      const flash=Math.max(0,1-k*3.6);
+      if(flash>0){
+        const g=c.createRadialGradient(0,0,0,0,0,R*3.4);
+        g.addColorStop(0,'rgba(255,253,240,'+(0.55*flash)+')');
+        g.addColorStop(0.45,'rgba(255,250,225,'+(0.22*flash)+')');
+        g.addColorStop(1,'rgba(255,250,225,0)');
+        c.fillStyle=g; c.beginPath(); c.arc(0,0,R*3.4,0,Math.PI*2); c.fill();
+      }
+      // ② 바깥으로 퍼지는 광파 + ③ 잔상 (세 겹이 시차를 두고 따라간다)
+      for(let i=0;i<3;i++){
+        const kk=Math.max(0,k-i*0.10);
+        if(kk<=0) continue;
+        const o=1-Math.pow(1-Math.min(1,kk/(1-i*0.10)),2.4);
+        const a=(1-kk)*(0.95-i*0.28);
+        c.strokeStyle='rgba(255,253,242,'+Math.max(0,a)+')';
+        c.lineWidth=Math.max(0.6,(4.6-i*1.3)*(1-kk)+0.6)*z;
+        c.beginPath(); c.arc(0,0,R+o*(52-i*8)*z,0,Math.PI*2); c.stroke();
+      }
+      // ④ 링 자체가 한 번 두꺼워졌다 가라앉는다
+      const th=Math.max(0,1-k*2.2);
+      if(th>0){
+        c.strokeStyle='rgba(255,255,250,'+(0.95*th)+')';
+        c.lineWidth=(2.6+3.4*th)*z;
+        c.beginPath(); c.arc(0,0,R,0,Math.PI*2); c.stroke();
+      }
+    }
+
+    // ── 에너지가 부족한데 시도했을 때 ──
+    if(notFullFx>=0){
+      const k=Math.min(1,notFullFx/NOTFULL_FX_T);
+      const a=1-k;
+      c.strokeStyle='rgba(190,206,232,'+(0.45*a)+')';
+      c.lineWidth=2.0*z;
+      c.setLineDash([5*z,5*z]);
+      c.beginPath(); c.arc(0,0,R+6*z,0,Math.PI*2); c.stroke();
+      c.setLineDash([]);
+      c.save(); c.globalAlpha=Math.min(1,a*1.6); c.textAlign='center';
+      c.fillStyle='rgba(6,8,14,.8)'; c.font='600 13px "Space Grotesk", sans-serif';
+      c.fillText('에너지를 채우세요', 1, -R-16*z+1);
+      c.fillStyle='#e6ecf8';
+      c.fillText('에너지를 채우세요', 0, -R-16*z);
+      c.restore();
+    }
+    c.restore();
+  }
+
+  function drawEnergyRing(c, x, y, z){
+    const e=energy;
+    const R=(PLAYER_R+12)*z;
+    c.save(); c.translate(x,y);
+    if(e>0.005){
+      // 바탕
+      c.strokeStyle='rgba(226,234,250,.12)';
+      c.lineWidth=2.0*z;
+      c.beginPath(); c.arc(0,0,R,0,Math.PI*2); c.stroke();
+      // 차오른 만큼 — 색 구분 없이 하나의 밝기
+      c.lineCap='round';
+      c.strokeStyle='rgba(226,240,255,'+(0.35+0.45*e)+')';
+      c.lineWidth=2.6*z;
+      c.beginPath(); c.arc(0,0,R,-Math.PI/2,-Math.PI/2+Math.PI*2*e); c.stroke();
       c.lineCap='butt';
     }
-    // 내부 은은한 빛
-    const g=c.createRadialGradient(0,0,0,0,0,R*1.5);
-    g.addColorStop(0,'rgba(220,238,255,'+(0.05+0.30*energy)+')');
-    g.addColorStop(1,'rgba(220,238,255,0)');
-    c.fillStyle=g; c.beginPath(); c.arc(0,0,R*1.5,0,Math.PI*2); c.fill();
-    // 중심 점 (충전량에 따라 커짐)
-    c.fillStyle='rgba(255,253,242,'+(0.35+0.6*energy)+')';
-    c.beginPath(); c.arc(0,0,2+4.5*energy,0,Math.PI*2); c.fill();
-    if(full){
-      c.strokeStyle='rgba(255,253,242,.35)'; c.lineWidth=1.5;
-      c.beginPath(); c.arc(0,0,R+5,0,Math.PI*2); c.stroke();
+    // 가득 찬 순간: 한 번 크게 퍼졌다가 사라진다
+    if(fullFx>=0){
+      const k=Math.min(1,fullFx/FULL_FX_T);
+      const ease=1-Math.pow(1-k,2);
+      c.strokeStyle='rgba(255,253,242,'+((1-k)*0.9)+')';
+      c.lineWidth=(3.4*(1-k)+1)*z;
+      c.beginPath(); c.arc(0,0,R+ease*26*z,0,Math.PI*2); c.stroke();
+      c.strokeStyle='rgba(255,253,242,'+((1-k)*0.55)+')';
+      c.lineWidth=3.0*z;
+      c.beginPath(); c.arc(0,0,R,0,Math.PI*2); c.stroke();
     }
     c.restore();
   }
@@ -1873,7 +1957,6 @@
         ctx.restore();
       }
 
-      drawEnergyRing(ctx, 44, 96);
       return;
     }
 
@@ -1897,36 +1980,59 @@
       ctx.drawImage(lit,0,0,W,H);
 
       drawPlayer(ctx,W/2,H/2,z);
+      if(state!=='gameover') drawEnergyRing(ctx, W/2, H/2, z);
 
       if(beaconT>0 && cleared===0) drawBeacon(ctx, z);
-      // 첫 위기: 두 번 탭하는 동작을 캐릭터 아래에 그려서 보여준다
+      // 첫 위기: 화면 중앙에 '톡 톡' 동작을 크게 보여준다
       if(pulsePrompt>0.02 && !pulseTaught){
-        const a=pulsePrompt, cx2=W/2, cy2=H/2+82;
-        const cyc=(pulsePromptPh%2.2);
+        const a=pulsePrompt;
+        // 세계를 살짝 가라앉혀 시선을 모은다
+        ctx.fillStyle='rgba(6,8,14,'+(0.42*a)+')'; ctx.fillRect(0,0,W,H);
+        // 캐릭터와 링은 다시 선명하게
+        const hole=ctx.createRadialGradient(W/2,H/2,0,W/2,H/2,120*z);
+        hole.addColorStop(0,'rgba(0,0,0,0)'); hole.addColorStop(1,'rgba(0,0,0,0)');
+        ctx.save(); ctx.globalCompositeOperation='destination-out';
+        const g2=ctx.createRadialGradient(W/2,H/2,10*z,W/2,H/2,95*z);
+        g2.addColorStop(0,'rgba(0,0,0,'+(0.85*a)+')'); g2.addColorStop(1,'rgba(0,0,0,0)');
+        ctx.fillStyle=g2; ctx.fillRect(0,0,W,H); ctx.restore();
+
+        const cx2=W/2, cy2=H/2+118;
+        const cyc=(pulsePromptPh%2.4);
+        // 두 번의 탭 — 원이 연달아 두 번 퍼진다
         for(let i=0;i<2;i++){
-          const t2=cyc-i*0.42;
-          if(t2<0||t2>0.62) continue;
-          const k=t2/0.62;
-          ctx.strokeStyle='rgba(238,250,255,'+((1-k)*0.85*a)+')';
-          ctx.lineWidth=2.4;
-          ctx.beginPath(); ctx.arc(cx2,cy2,10+22*k,0,Math.PI*2); ctx.stroke();
+          const t2=cyc-i*0.40;
+          if(t2<0||t2>0.66) continue;
+          const k=t2/0.66;
+          ctx.strokeStyle='rgba(238,250,255,'+((1-k)*0.9*a)+')';
+          ctx.lineWidth=2.8;
+          ctx.beginPath(); ctx.arc(cx2,cy2,13+30*k,0,Math.PI*2); ctx.stroke();
         }
-        ctx.fillStyle='rgba(10,14,28,'+(0.55*a)+')';
-        ctx.beginPath(); ctx.arc(cx2,cy2,13,0,Math.PI*2); ctx.fill();
-        ctx.fillStyle='rgba(238,250,255,'+(0.92*a)+')';
-        ctx.beginPath(); ctx.arc(cx2,cy2,9.5,0,Math.PI*2); ctx.fill();
-        // 두 번이라는 것을 점 두 개로
+        // 손가락 끝
+        const press=(cyc<0.16||(cyc>0.40&&cyc<0.56))?1:0;
+        ctx.fillStyle='rgba(10,14,28,'+(0.75*a)+')';
+        ctx.beginPath(); ctx.arc(cx2,cy2,17-press*2,0,Math.PI*2); ctx.fill();
+        ctx.fillStyle='rgba(238,250,255,'+((0.85+0.15*press)*a)+')';
+        ctx.beginPath(); ctx.arc(cx2,cy2,13-press*2,0,Math.PI*2); ctx.fill();
         ctx.fillStyle='rgba(20,24,40,'+(0.9*a)+')';
-        ctx.beginPath(); ctx.arc(cx2-3.2,cy2,1.7,0,Math.PI*2); ctx.fill();
-        ctx.beginPath(); ctx.arc(cx2+3.2,cy2,1.7,0,Math.PI*2); ctx.fill();
+        ctx.beginPath(); ctx.arc(cx2-4.2,cy2,2.1,0,Math.PI*2); ctx.fill();
+        ctx.beginPath(); ctx.arc(cx2+4.2,cy2,2.1,0,Math.PI*2); ctx.fill();
+        // PULSE 한 단어만
+        ctx.save(); ctx.globalAlpha=a; ctx.textAlign='center';
+        ctx.fillStyle='rgba(6,8,14,.8)'; ctx.font='700 17px "Space Grotesk", sans-serif';
+        ctx.fillText('PULSE', cx2+1, cy2+57);
+        ctx.fillStyle='#f4ede0';
+        ctx.fillText('PULSE', cx2, cy2+56);
+        ctx.restore();
+        // 준비된 링을 한 번 더 강조
+        ctx.strokeStyle='rgba(255,253,242,'+(0.35*a*(0.5+0.5*Math.sin(pulsePromptPh*3)))+')';
+        ctx.lineWidth=2.2;
+        ctx.beginPath(); ctx.arc(W/2,H/2,(PLAYER_R+20)*z,0,Math.PI*2); ctx.stroke();
       }
 
       // 시야 밖 유령의 기척 — 캐릭터 주변에 대략적인 방향만 짧게 스친다
       drawTells(ctx, z);
 
-      // 좌상단 에너지 링
-      const topInset = 96;
-      if(state!=='gameover') drawEnergyRing(ctx, 44, topInset);
+
 
       // ---- 잡히는 순간의 연출 ----
       if(state==='gameover'){
